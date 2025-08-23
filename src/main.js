@@ -1146,7 +1146,7 @@ function buildOverlayMain() {
 
           // Also stop protection mode if it's running
           console.log("AUTOFILL: Stopping protection mode if active");
-          if (window.bmProtectionInterval || button.textContent === 'Stop Fill') {
+          if (window.bmProtectionInterval) {
             console.log("AUTOFILL: Protection mode stopped");
             clearInterval(window.bmProtectionInterval);
             window.bmProtectionInterval = null;
@@ -1212,7 +1212,10 @@ function buildOverlayMain() {
               if (window.bmProtectMode) {
                 console.log("AUTOFILL: Starting protection mode - monitoring");
                 updateAutoFillOutput('🛡️ Protection mode active - monitoring template');
-                button.textContent = 'Stop Fill'; // Keep the button as "Stop Fill" for protection mode
+                // Ensure auto-fill is not considered running while monitoring
+                isRunning = false;
+                // Keep the button ready to start when protection detects damage
+                button.textContent = 'Auto Fill';
 
                 const protectionInterval = setInterval(async () => {
                   try {
@@ -1244,7 +1247,13 @@ function buildOverlayMain() {
 
                         // Restart auto-fill by clicking the button
                         clearInterval(protectionInterval);
+                        // Ensure the global interval reference is cleared
+                        if (window.bmProtectionInterval) {
+                          window.bmProtectionInterval = null;
+                        }
                         updateAutoFillOutput('🛡️ Protection mode: Restarting auto-fill to fix damaged pixels');
+                        // Make sure we go through the "start" path, not the "stop" path
+                        isRunning = false;
                         button.click(); // This will restart the auto-fill
                       } else {
                         console.log("PROTECT: No charges available for immediate fixing");
