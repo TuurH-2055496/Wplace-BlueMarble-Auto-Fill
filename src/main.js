@@ -303,7 +303,9 @@ function buildOverlayMain() {
             '#bm-input-file-template',           // Template file upload interface
             '#bm-contain-buttons-action',        // Action buttons container
             `#${instance.outputStatusId}`,       // Main status log textarea for user feedback
-            '#bm-autofill-output'                // Auto-fill specific output textarea
+            '#bm-autofill-output',               // Auto-fill specific output textarea
+            '#bm-progress-display',              // Progress display textarea
+            '#bm-performance-display'            // Performance metrics display textarea
           ];
 
           // Apply visibility changes to all toggleable elements
@@ -530,6 +532,11 @@ function buildOverlayMain() {
         // Kills itself if there is no file
         if (!input?.files[0]) { instance.handleDisplayError(`No file selected!`); return; }
 
+        // Clear template analysis cache when new template is created
+        templateAnalysisCache = null;
+        templateAnalysisCacheKey = null;
+        console.log("PERFORMANCE: Template cache cleared for new template");
+
         await templateManager.createTemplate(input.files[0], input.files[0]?.name.replace(/\.[^/.]+$/, ''), [Number(coordTlX.value), Number(coordTlY.value), Number(coordPxX.value), Number(coordPxY.value)]);
 
         instance.handleDisplayStatus(`Drew to canvas!`);
@@ -539,6 +546,13 @@ function buildOverlayMain() {
       button.onclick = () => {
         instance.apiManager?.templateManager?.setTemplatesShouldBeDrawn(false);
         instance.handleDisplayStatus(`Disabled templates!`);
+        
+        // Clear template analysis cache when templates are disabled to free memory
+        templateAnalysisCache = null;
+        templateAnalysisCacheKey = null;
+        performanceMetrics = { analysisTime: 0, cacheHits: 0, cacheMisses: 0 };
+        console.log("PERFORMANCE: Template cache cleared (templates disabled)");
+        
         // Disable auto-fill button when templates are disabled
         const autoFillBtn = document.querySelector('#bm-button-autofill');
         const modeBtn = document.querySelector('#bm-button-mode');
@@ -781,7 +795,34 @@ function buildOverlayMain() {
         }
       };
 
+      // Helper function to update performance display
+      const updatePerformanceDisplay = () => {
+        const textarea = document.querySelector('#bm-performance-display');
+        if (textarea) {
+          const cacheEfficiency = performanceMetrics.cacheHits + performanceMetrics.cacheMisses > 0 
+            ? (performanceMetrics.cacheHits / (performanceMetrics.cacheHits + performanceMetrics.cacheMisses) * 100).toFixed(1)
+            : '0.0';
+          
+          const content = `Performance Metrics:
+Cache: ${performanceMetrics.cacheHits} hits, ${performanceMetrics.cacheMisses} misses (${cacheEfficiency}% hit rate)
+Last analysis: ${performanceMetrics.analysisTime.toFixed(2)}ms
+Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
+          
+          textarea.value = content;
+        }
+      };
+
+      // Cache for template analysis to avoid reprocessing every time
+      let templateAnalysisCache = null;
+      let templateAnalysisCacheKey = null;
+      let performanceMetrics = {
+        analysisTime: 0,
+        cacheHits: 0,
+        cacheMisses: 0
+      };
+
       const getNextPixels = async (count, ownedColors = []) => {
+        const startTime = performance.now();
         const chunkGroups = {}; // Store pixels grouped by chunk
         if (!instance.apiManager?.templateManager?.templatesArray?.length) return [];
 
@@ -792,31 +833,157 @@ function buildOverlayMain() {
           return [];
         }
 
+        // Create a cache key based on template and owned colors
+        const cacheKey = `${Object.keys(chunkedBitmaps).length}_${ownedColors.join(',')}`;
+        
         // Convert ownedColors array to Set for faster lookup
         const ownedColorsSet = new Set(ownedColors);
 
-        // Sort the chunk keys to ensure consistent processing order
-        const sortedChunkKeys = Object.keys(chunkedBitmaps).sort();
+        // Check if we can use cached template analysis
+        if (templateAnalysisCache && templateAnalysisCacheKey === cacheKey) {
+          performanceMetrics.cacheHits++;
+          const cacheTime = performance.now() - startTime;
+          console.log(`PERFORMANCE: Using cached template analysis (${cacheTime.toFixed(2)}ms) - Cache hits: ${performanceMetrics.cacheHits}`);
+          updateAutoFillOutput(`⚡ Cache hit! Analysis completed in ${cacheTime.toFixed(2)}ms (${performanceMetrics.cacheHits} hits)`);
+          updatePerformanceDisplay();
+        } else {
+          performanceMetrics.cacheMisses++;
+          const analysisStartTime = performance.now();
+          console.log(`PERFORMANCE: Analyzing template (cache miss ${performanceMetrics.cacheMisses}) - this may take a moment for large templates`);
+          updateAutoFillOutput('🔍 Analyzing template structure...');
+          
+          // Sort the chunk keys to ensure consistent processing order
+          const sortedChunkKeys = Object.keys(chunkedBitmaps).sort();
 
-        // Cache for fetched chunks to avoid multiple requests
-        const chunkCache = new Map();
+          // Cache for fetched chunks to avoid multiple requests
+          const chunkCache = new Map();
 
-        // Collect ALL pixels that exist in the template (for edge detection)
-        const allTemplatePixels = new Set();
-        // Collect ALL pixels that need placement
+          // Collect ALL pixels that exist in the template (for edge detection)
+          const allTemplatePixels = new Set();
+          // Pre-analyzed template pixels with their properties
+          const templatePixelCache = new Map();
+
+          // Process ALL chunks and pre-analyze template pixels
+          let processedChunks = 0;
+          for (const key of sortedChunkKeys) {
+            const bitmap = chunkedBitmaps[key];
+            if (!bitmap) continue;
+
+            processedChunks++;
+            if (processedChunks % 10 === 0) {
+              const partialTime = performance.now() - analysisStartTime;
+              console.log(`PERFORMANCE: Processed ${processedChunks}/${sortedChunkKeys.length} chunks in ${partialTime.toFixed(2)}ms`);
+              updateAutoFillOutput(`⚡ Analyzing chunk ${processedChunks}/${sortedChunkKeys.length} (${partialTime.toFixed(2)}ms)...`);
+              // Allow UI updates during heavy processing
+              await new Promise(resolve => setTimeout(resolve, 1));
+            }
+
+            // Parse the key: "chunkX,chunkY,tilePixelX,tilePixelY"
+            const parts = key.split(',').map(Number);
+            const [chunkX, chunkY, tilePixelX, tilePixelY] = parts;
+
+            // Create template pixel analysis only once - cache the ImageData extraction
+            let templateImageData;
+            if (!templatePixelCache.has(key)) {
+              const templateCanvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+              const templateCtx = templateCanvas.getContext('2d');
+              templateCtx.drawImage(bitmap, 0, 0);
+              templateImageData = templateCtx.getImageData(0, 0, bitmap.width, bitmap.height);
+              templatePixelCache.set(key, templateImageData);
+            } else {
+              templateImageData = templatePixelCache.get(key);
+            }
+
+            // Pre-process template pixels and store their analysis
+            const chunkPixels = [];
+            
+            // Scan each pixel in the template bitmap - batch process for efficiency
+            // Start at (1,1) and step by 3 to skip the 3x3 grid pattern with transparency
+            for (let y = 1; y < bitmap.height; y += 3) {
+              for (let x = 1; x < bitmap.width; x += 3) {
+                // Check template pixel
+                const templatePixelIndex = (y * bitmap.width + x) * 4;
+                const templateAlpha = templateImageData.data[templatePixelIndex + 3];
+                if (templateAlpha === 0) {
+                  continue; // Skip transparent pixels in template
+                }
+
+                // Get template pixel color
+                const templateR = templateImageData.data[templatePixelIndex];
+                const templateG = templateImageData.data[templatePixelIndex + 1];
+                const templateB = templateImageData.data[templatePixelIndex + 2];
+                const templateColorId = getColorIdFromRGB(templateR, templateG, templateB, templateAlpha);
+
+                // Calculate "crushed down" coordinates - convert 3x3 grid position to logical position
+                const logicalX = Math.floor((x - 1) / 3); // Convert bitmap x to logical x (0, 1, 2, ...)
+                const logicalY = Math.floor((y - 1) / 3); // Convert bitmap y to logical y (0, 1, 2, ...)
+
+                // Calculate final logical coordinates relative to the chunk
+                const finalLogicalX = tilePixelX + logicalX;
+                const finalLogicalY = tilePixelY + logicalY;
+                const pixelKey = `${chunkX},${chunkY},${finalLogicalX},${finalLogicalY}`;
+
+                // Add ALL template pixels to our comprehensive set (for edge detection)
+                allTemplatePixels.add(pixelKey);
+
+                // Store pixel data for later processing
+                chunkPixels.push({
+                  chunkX,
+                  chunkY,
+                  finalLogicalX,
+                  finalLogicalY,
+                  templateColorId,
+                  pixelKey,
+                  ownedColor: ownedColors.length === 0 || ownedColorsSet.has(templateColorId)
+                });
+              }
+            }
+
+            // Store processed chunk data
+            templatePixelCache.set(`${key}_pixels`, chunkPixels);
+          }
+
+          // Cache the complete analysis
+          templateAnalysisCache = {
+            allTemplatePixels,
+            templatePixelCache,
+            sortedChunkKeys,
+            chunkCache: new Map() // Fresh cache for current state data
+          };
+          templateAnalysisCacheKey = cacheKey;
+          
+          performanceMetrics.analysisTime = performance.now() - analysisStartTime;
+          console.log(`PERFORMANCE: Template analysis complete and cached in ${performanceMetrics.analysisTime.toFixed(2)}ms`);
+          updateAutoFillOutput(`✅ Template analysis complete (${performanceMetrics.analysisTime.toFixed(2)}ms) and cached for future use!`);
+          updatePerformanceDisplay();
+        }
+
+        // Use cached analysis
+        const { allTemplatePixels, templatePixelCache, sortedChunkKeys } = templateAnalysisCache;
+        const chunkCache = templateAnalysisCache.chunkCache;
+
+        // Collect pixels that need placement by checking current state
         const allPixelsToPlace = [];
-
-        // Process ALL pixels first, regardless of count
+        let processedChunks = 0;
+        
         for (const key of sortedChunkKeys) {
-          const bitmap = chunkedBitmaps[key];
-          if (!bitmap) continue;
+          const chunkPixels = templatePixelCache.get(`${key}_pixels`);
+          if (!chunkPixels) continue;
 
-          // Parse the key: "chunkX,chunkY,tilePixelX,tilePixelY"
+          // Only fetch chunk data if we have pixels that might need placement
+          const ownedPixelsInChunk = chunkPixels.filter(p => p.ownedColor);
+          if (ownedPixelsInChunk.length === 0) continue;
+
+          processedChunks++;
+          if (processedChunks % 5 === 0) {
+            updateAutoFillOutput(`🔍 Checking current state ${processedChunks} chunks...`);
+            // Allow UI updates during processing
+            await new Promise(resolve => setTimeout(resolve, 1));
+          }
+
+          // Parse the key for chunk coordinates
           const parts = key.split(',').map(Number);
-          const [chunkX, chunkY, tilePixelX, tilePixelY] = parts;
-
-          // Print out the chunk and tile coordinate data
-          console.log(`Processing tile - ChunkX: ${chunkX}, ChunkY: ${chunkY}, TileCoordX: ${tilePixelX}, TileCoordY: ${tilePixelY}`);
+          const [chunkX, chunkY] = parts;
 
           // Fetch current chunk data if not already cached
           const chunkKey = `${chunkX},${chunkY}`;
@@ -826,13 +993,7 @@ function buildOverlayMain() {
           }
           const currentChunk = chunkCache.get(chunkKey);
 
-          // Create an OffscreenCanvas to read the template bitmap pixel data
-          const templateCanvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-          const templateCtx = templateCanvas.getContext('2d');
-          templateCtx.drawImage(bitmap, 0, 0);
-          const templateImageData = templateCtx.getImageData(0, 0, bitmap.width, bitmap.height);
-
-          // Create canvas for current chunk data if it exists
+          // Process chunk pixels efficiently
           let currentImageData = null;
           if (currentChunk) {
             const currentCanvas = new OffscreenCanvas(currentChunk.width, currentChunk.height);
@@ -841,74 +1002,32 @@ function buildOverlayMain() {
             currentImageData = currentCtx.getImageData(0, 0, currentChunk.width, currentChunk.height);
           }
 
+          // Check each pixel in this chunk
+          for (const pixel of ownedPixelsInChunk) {
+            // Check if pixel is already placed correctly
+            let needsPlacement = true;
+            if (currentImageData) {
+              // Make sure we're within bounds of the current chunk
+              if (pixel.finalLogicalX >= 0 && pixel.finalLogicalX < currentImageData.width &&
+                pixel.finalLogicalY >= 0 && pixel.finalLogicalY < currentImageData.height) {
+                // Check current pixel color at this position
+                const currentPixelIndex = (pixel.finalLogicalY * currentImageData.width + pixel.finalLogicalX) * 4;
+                const currentR = currentImageData.data[currentPixelIndex];
+                const currentG = currentImageData.data[currentPixelIndex + 1];
+                const currentB = currentImageData.data[currentPixelIndex + 2];
+                const currentAlpha = currentImageData.data[currentPixelIndex + 3];
+                const currentColorId = getColorIdFromRGB(currentR, currentG, currentB, currentAlpha);
 
-          // Scan each pixel in the template bitmap - NO EARLY BREAKS
-          // Start at (1,1) and step by 3 to skip the 3x3 grid pattern with transparency
-          for (let y = 1; y < bitmap.height; y += 3) {
-            for (let x = 1; x < bitmap.width; x += 3) {
-              // Check template pixel
-              const templatePixelIndex = (y * bitmap.width + x) * 4;
-              const templateAlpha = templateImageData.data[templatePixelIndex + 3];
-              if (templateAlpha === 0) {
-                continue; // Skip transparent pixels in template
-              }
-
-              // Get template pixel color
-              const templateR = templateImageData.data[templatePixelIndex];
-              const templateG = templateImageData.data[templatePixelIndex + 1];
-              const templateB = templateImageData.data[templatePixelIndex + 2];
-              const templateColorId = getColorIdFromRGB(templateR, templateG, templateB, templateAlpha);
-
-              // Calculate "crushed down" coordinates - convert 3x3 grid position to logical position
-              const logicalX = Math.floor((x - 1) / 3); // Convert bitmap x to logical x (0, 1, 2, ...)
-              const logicalY = Math.floor((y - 1) / 3); // Convert bitmap y to logical y (0, 1, 2, ...)
-
-              // Calculate final logical coordinates relative to the chunk
-              const finalLogicalX = tilePixelX + logicalX;
-              const finalLogicalY = tilePixelY + logicalY;
-              const pixelKey = `${chunkX},${chunkY},${finalLogicalX},${finalLogicalY}`;
-
-              // Add ALL template pixels to our comprehensive set (for edge detection)
-              allTemplatePixels.add(pixelKey);
-
-              // Skip pixels with colors we don't own
-              if (ownedColors.length > 0 && !ownedColorsSet.has(templateColorId)) {
-                // console.log(`🔒 SKIPPING pixel at (${absX}, ${absY}) - Color ${templateColorId} not owned`);
-                continue;
-              }
-
-              // Check if pixel is already placed correctly
-              let needsPlacement = true;
-              if (currentImageData) {
-                // Make sure we're within bounds of the current chunk
-                if (finalLogicalX >= 0 && finalLogicalX < currentImageData.width &&
-                  finalLogicalY >= 0 && finalLogicalY < currentImageData.height) {
-                  // Check current pixel color at this position
-                  const currentPixelIndex = (finalLogicalY * currentImageData.width + finalLogicalX) * 4;
-                  const currentR = currentImageData.data[currentPixelIndex];
-                  const currentG = currentImageData.data[currentPixelIndex + 1];
-                  const currentB = currentImageData.data[currentPixelIndex + 2];
-                  const currentAlpha = currentImageData.data[currentPixelIndex + 3];
-                  const currentColorId = getColorIdFromRGB(currentR, currentG, currentB, currentAlpha);
-
-                  // If the current pixel already matches the template color, skip it
-                  if (currentColorId === templateColorId) {
-                    needsPlacement = false;
-                  }
+                // If the current pixel already matches the template color, skip it
+                if (currentColorId === pixel.templateColorId) {
+                  needsPlacement = false;
                 }
               }
+            }
 
-              // Add pixels that need placement to our collection
-              if (needsPlacement && !placedPixels.has(pixelKey)) {
-                allPixelsToPlace.push({
-                  chunkX,
-                  chunkY,
-                  finalLogicalX,
-                  finalLogicalY,
-                  templateColorId,
-                  pixelKey
-                });
-              }
+            // Add pixels that need placement to our collection
+            if (needsPlacement && !placedPixels.has(pixel.pixelKey)) {
+              allPixelsToPlace.push(pixel);
             }
           }
         }
@@ -917,50 +1036,77 @@ function buildOverlayMain() {
         const modeBtn = document.querySelector('#bm-button-mode');
         const currentMode = modeBtn ? modeBtn.textContent.replace('Mode: ', '') : 'Random';
 
-        // Helper function to check if a pixel is on the edge of the template
-        const isEdgePixel = (pixel) => {
-          console.log("AUTOFILL: Ran Edge Pixel")
-          // Check if this pixel has any neighboring position that would be outside the template
-          // A pixel is on the edge if any of its 8 neighboring positions are not in the template
+        // Optimized edge detection using pre-computed neighbor map
+        let edgePixels = [];
+        let nonEdgePixels = [];
 
-          // Convert to global coordinates (chunk size is 1000x1000)
-          const globalX = (pixel.chunkX * 1000) + pixel.finalLogicalX;
-          const globalY = (pixel.chunkY * 1000) + pixel.finalLogicalY;
-
-          // Define the 8 neighboring positions in global coordinates (including diagonals)
-          const neighbors = [
-            [globalX - 1, globalY - 1], // Top-left
-            [globalX, globalY - 1],     // Top
-            [globalX + 1, globalY - 1], // Top-right
-            [globalX - 1, globalY],     // Left
-            [globalX + 1, globalY],     // Right
-            [globalX - 1, globalY + 1], // Bottom-left
-            [globalX, globalY + 1],     // Bottom
-            [globalX + 1, globalY + 1]  // Bottom-right
+        if (allPixelsToPlace.length < 50000) { // Only do edge detection for smaller templates to avoid performance issues
+          console.log("PERFORMANCE: Computing edge detection for template optimization");
+          updateAutoFillOutput('🔍 Computing edge detection for better placement order...');
+          
+          // Pre-compute neighbor positions for faster lookup
+          const neighborOffsets = [
+            [-1, -1], [0, -1], [1, -1], // Top row
+            [-1, 0],           [1, 0],  // Middle row (excluding center)
+            [-1, 1],  [0, 1],  [1, 1]   // Bottom row
           ];
 
-          // Check if any neighbor position is missing from our ALL template pixels
-          for (const [neighGlobalX, neighGlobalY] of neighbors) {
-            // Convert neighbor global coordinates back to chunk coordinates
-            const neighChunkX = Math.floor(neighGlobalX / 1000);
-            const neighChunkY = Math.floor(neighGlobalY / 1000);
-            const neighLogicalX = neighGlobalX - (neighChunkX * 1000);
-            const neighLogicalY = neighGlobalY - (neighChunkY * 1000);
+          // Build a more efficient lookup for template pixels using global coordinates
+          const globalTemplatePixels = new Set();
+          for (const pixelKey of allTemplatePixels) {
+            const [chunkX, chunkY, logicalX, logicalY] = pixelKey.split(',').map(Number);
+            const globalX = (chunkX * 1000) + logicalX;
+            const globalY = (chunkY * 1000) + logicalY;
+            globalTemplatePixels.add(`${globalX},${globalY}`);
+          }
 
-            const neighborKey = `${neighChunkX},${neighChunkY},${neighLogicalX},${neighLogicalY}`;
+          // Optimized edge detection function
+          const isEdgePixel = (pixel) => {
+            // Convert to global coordinates (chunk size is 1000x1000)
+            const globalX = (pixel.chunkX * 1000) + pixel.finalLogicalX;
+            const globalY = (pixel.chunkY * 1000) + pixel.finalLogicalY;
 
-            // Check if this neighbor exists in our complete template pixel set
-            if (!allTemplatePixels.has(neighborKey)) {
-              return true; // Missing neighbor means this pixel is on the edge
+            // Check if any neighbor position is missing from our template
+            for (const [dx, dy] of neighborOffsets) {
+              const neighGlobalX = globalX + dx;
+              const neighGlobalY = globalY + dy;
+              const neighborKey = `${neighGlobalX},${neighGlobalY}`;
+
+              // Check if this neighbor exists in our complete template pixel set
+              if (!globalTemplatePixels.has(neighborKey)) {
+                return true; // Missing neighbor means this pixel is on the edge
+              }
+            }
+
+            return false; // All neighbors exist, so this is an interior pixel
+          };
+
+          // Separate edge pixels from non-edge pixels (batch process for efficiency)
+          let processedPixels = 0;
+          for (const pixel of allPixelsToPlace) {
+            if (isEdgePixel(pixel)) {
+              edgePixels.push(pixel);
+            } else {
+              nonEdgePixels.push(pixel);
+            }
+            
+            processedPixels++;
+            if (processedPixels % 10000 === 0) {
+              updateAutoFillOutput(`⚡ Edge detection progress: ${processedPixels}/${allPixelsToPlace.length}...`);
+              // Allow UI updates during heavy processing
+              await new Promise(resolve => setTimeout(resolve, 1));
             }
           }
 
-          return false; // All neighbors exist, so this is an interior pixel
-        };
-
-        // Separate edge pixels from non-edge pixels (edge pixels have highest priority)
-        const edgePixels = allPixelsToPlace.filter(pixel => isEdgePixel(pixel));
-        const nonEdgePixels = allPixelsToPlace.filter(pixel => !isEdgePixel(pixel));
+          console.log(`PERFORMANCE: Edge detection complete - ${edgePixels.length} edge, ${nonEdgePixels.length} non-edge pixels`);
+          updateAutoFillOutput(`✅ Edge detection complete: ${edgePixels.length} edge pixels prioritized`);
+        } else {
+          // For very large templates, skip edge detection to avoid performance issues
+          console.log("PERFORMANCE: Skipping edge detection for large template - using random order");
+          updateAutoFillOutput('⚡ Large template detected - using optimized random placement order');
+          nonEdgePixels = allPixelsToPlace;
+          edgePixels = [];
+        }
 
         // Debug log to see what we're working with
         console.log(`DEBUG: Total pixels to place: ${allPixelsToPlace.length}, Edge pixels: ${edgePixels.length}, Non-edge pixels: ${nonEdgePixels.length}`);
@@ -1538,6 +1684,7 @@ function buildOverlayMain() {
     .addTextarea({ 'id': overlayMain.outputStatusId, 'placeholder': `Status: Sleeping...\nVersion: ${version}`, 'readOnly': true }).buildElement()
     .addTextarea({ 'id': 'bm-autofill-output', 'placeholder': 'Auto-Fill Output:\nWaiting for auto-fill to start...', 'readOnly': true }).buildElement()
     .addTextarea({ 'id': 'bm-progress-display', 'placeholder': 'Progress:\nWaiting for template analysis...', 'readOnly': true }).buildElement()
+    .addTextarea({ 'id': 'bm-performance-display', 'placeholder': 'Performance:\nCache: 0 hits, 0 misses\nAnalysis time: 0ms', 'readOnly': true, 'style': 'height: 60px; font-size: 11px;' }).buildElement()
     .addDiv({ 'id': 'bm-contain-buttons-action' })
     .addDiv()
     .addButton({ 'id': 'bm-button-convert', 'className': 'bm-help', 'innerHTML': '🎨', 'title': 'Template Color Converter' },

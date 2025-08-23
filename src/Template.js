@@ -54,18 +54,23 @@ export default class Template {
     const imageHeight = bitmap.height;
     
     // Calculate total pixel count using standard width × height formula
-    // TODO: Use non-transparent pixels instead of basic width times height
-    const totalPixels = imageWidth * imageHeight;
-    console.log(`Template pixel analysis - Dimensions: ${imageWidth}×${imageHeight} = ${totalPixels.toLocaleString()} pixels`);
-    
-    // Store pixel count in instance property for access by template manager and UI components
-    this.pixelCount = totalPixels;
+    // For performance, we'll calculate actual non-transparent pixels during processing
+    let actualPixelCount = 0;
+    console.log(`Template dimensions: ${imageWidth}×${imageHeight} = ${(imageWidth * imageHeight).toLocaleString()} total pixels`);
 
     const templateTiles = {}; // Holds the template tiles
     const templateTilesBuffers = {}; // Holds the buffers of the template tiles
 
     const canvas = new OffscreenCanvas(this.tileSize, this.tileSize);
     const context = canvas.getContext('2d', { willReadFrequently: true });
+
+    // Pre-extract the entire template image data once for efficiency
+    const sourceCanvas = new OffscreenCanvas(imageWidth, imageHeight);
+    const sourceContext = sourceCanvas.getContext('2d');
+    sourceContext.drawImage(bitmap, 0, 0);
+    const sourceImageData = sourceContext.getImageData(0, 0, imageWidth, imageHeight);
+
+    console.log('PERFORMANCE: Pre-extracted template image data for faster processing');
 
     // For every tile...
     for (let pixelY = this.coords[3]; pixelY < imageHeight + this.coords[3]; ) {
@@ -76,11 +81,7 @@ export default class Template {
       // B. The top left corner of the current tile to the bottom right corner of the image
       const drawSizeY = Math.min(this.tileSize - (pixelY % this.tileSize), imageHeight - (pixelY - this.coords[3]));
 
-      console.log(`Math.min(${this.tileSize} - (${pixelY} % ${this.tileSize}), ${imageHeight} - (${pixelY - this.coords[3]}))`);
-
       for (let pixelX = this.coords[2]; pixelX < imageWidth + this.coords[2];) {
-
-        console.log(`Pixel X: ${pixelX}\nPixel Y: ${pixelY}`);
 
         // Draws the partial tile first, if any
         // This calculates the size based on which is smaller:
@@ -88,24 +89,16 @@ export default class Template {
         // B. The top left corner of the current tile to the bottom right corner of the image
         const drawSizeX = Math.min(this.tileSize - (pixelX % this.tileSize), imageWidth - (pixelX - this.coords[2]));
 
-        console.log(`Math.min(${this.tileSize} - (${pixelX} % ${this.tileSize}), ${imageWidth} - (${pixelX - this.coords[2]}))`);
-
-        console.log(`Draw Size X: ${drawSizeX}\nDraw Size Y: ${drawSizeY}`);
-
         // Change the canvas size and wipe the canvas
-        const canvasWidth = drawSizeX * shreadSize;// + (pixelX % this.tileSize) * shreadSize;
-        const canvasHeight = drawSizeY * shreadSize;// + (pixelY % this.tileSize) * shreadSize;
+        const canvasWidth = drawSizeX * shreadSize;
+        const canvasHeight = drawSizeY * shreadSize;
         canvas.width = canvasWidth;
         canvas.height = canvasHeight;
 
-        console.log(`Draw X: ${drawSizeX}\nDraw Y: ${drawSizeY}\nCanvas Width: ${canvasWidth}\nCanvas Height: ${canvasHeight}`);
-
         context.imageSmoothingEnabled = false; // Nearest neighbor
 
-        console.log(`Getting X ${pixelX}-${pixelX + drawSizeX}\nGetting Y ${pixelY}-${pixelY + drawSizeY}`);
-
         // Draws the template segment on this tile segment
-        context.clearRect(0, 0, canvasWidth, canvasHeight); // Clear any previous drawing (only runs when canvas size does not change)
+        context.clearRect(0, 0, canvasWidth, canvasHeight); // Clear any previous drawing
         context.drawImage(
           bitmap, // Bitmap image to draw
           pixelX - this.coords[2], // Coordinate X to draw from
@@ -118,13 +111,10 @@ export default class Template {
           drawSizeY * shreadSize // Y height to draw at
         ); // Coordinates and size of draw area of source image, then canvas
 
-        // const final = await canvas.convertToBlob({ type: 'image/png' });
-        // const url = URL.createObjectURL(final); // Creates a blob URL
-        // window.open(url, '_blank'); // Opens a new tab with blob
-        // setTimeout(() => URL.revokeObjectURL(url), 60000); // Destroys the blob 1 minute later
-
         const imageData = context.getImageData(0, 0, canvasWidth, canvasHeight); // Data of the image on the canvas
 
+        // Count non-transparent pixels and apply transparency optimization
+        let tilePixelCount = 0;
         for (let y = 0; y < canvasHeight; y++) {
           for (let x = 0; x < canvasWidth; x++) {
             // For every pixel...
@@ -133,18 +123,24 @@ export default class Template {
             if (x % shreadSize !== 1 || y % shreadSize !== 1) {
               const pixelIndex = (y * canvasWidth + x) * 4; // Find the pixel index in an array where every 4 indexes are 1 pixel
               imageData.data[pixelIndex + 3] = 0; // Make the pixel transparent on the alpha channel
-
-              // if (!!imageData.data[pixelIndex + 3]) {
-              //   imageData.data[pixelIndex + 3] = 50; // Alpha
-              //   imageData.data[pixelIndex] = 30; // Red
-              //   imageData.data[pixelIndex + 1] = 30; // Green
-              //   imageData.data[pixelIndex + 2] = 30; // Blue
-              // }
+            } else {
+              // This is a center pixel - check if it's non-transparent in the source
+              const sourceX = Math.floor(x / shreadSize) + (pixelX - this.coords[2]);
+              const sourceY = Math.floor(y / shreadSize) + (pixelY - this.coords[3]);
+              
+              if (sourceX >= 0 && sourceX < imageWidth && sourceY >= 0 && sourceY < imageHeight) {
+                const sourcePixelIndex = (sourceY * imageWidth + sourceX) * 4;
+                const sourceAlpha = sourceImageData.data[sourcePixelIndex + 3];
+                
+                if (sourceAlpha > 0) {
+                  tilePixelCount++;
+                }
+              }
             }
           }
         }
 
-        console.log(`Shreaded pixels for ${pixelX}, ${pixelY}`, imageData);
+        actualPixelCount += tilePixelCount;
 
         context.putImageData(imageData, 0, 0);
 
@@ -164,13 +160,15 @@ export default class Template {
         const canvasBufferBytes = Array.from(new Uint8Array(canvasBuffer));
         templateTilesBuffers[templateTileName] = uint8ToBase64(canvasBufferBytes); // Stores the buffer
 
-        console.log(templateTiles);
-
         pixelX += drawSizeX;
       }
 
       pixelY += drawSizeY;
     }
+
+    // Store the actual non-transparent pixel count for better accuracy
+    this.pixelCount = actualPixelCount;
+    console.log(`PERFORMANCE: Template processing complete - ${actualPixelCount.toLocaleString()} non-transparent pixels`);
 
     console.log('Template Tiles: ', templateTiles);
     console.log('Template Tiles Buffers: ', templateTilesBuffers);
