@@ -502,6 +502,7 @@ function buildOverlayMain() {
         const autoFillBtn = document.querySelector('#bm-button-autofill');
         const modeBtn = document.querySelector('#bm-button-mode');
         const protectBtn = document.querySelector('#bm-button-protect');
+        const placeNowBtn = document.querySelector('#bm-button-placenow');
         if (instance.apiManager?.templateManager?.templatesArray.length && instance.apiManager?.templateManager?.templatesShouldBeDrawn) {
           if (autoFillBtn) {
             autoFillBtn.disabled = false;
@@ -511,6 +512,9 @@ function buildOverlayMain() {
           }
           if (protectBtn) {
             protectBtn.disabled = false;
+          }
+          if (placeNowBtn) {
+            placeNowBtn.disabled = false;
           }
 
         }
@@ -557,6 +561,7 @@ function buildOverlayMain() {
         const autoFillBtn = document.querySelector('#bm-button-autofill');
         const modeBtn = document.querySelector('#bm-button-mode');
         const protectBtn = document.querySelector('#bm-button-protect');
+        const placeNowBtn = document.querySelector('#bm-button-placenow');
         if (autoFillBtn) {
           autoFillBtn.disabled = true;
         }
@@ -565,6 +570,9 @@ function buildOverlayMain() {
         }
         if (protectBtn) {
           protectBtn.disabled = true;
+        }
+        if (placeNowBtn) {
+          placeNowBtn.disabled = true;
         }
       }
     }).buildElement()
@@ -1318,6 +1326,97 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
         }
       };
 
+      // Place Now: reuse existing helpers to immediately place with available charges during auto-fill
+      window.bmPlaceNow = async () => {
+        try {
+          if (!isRunning) {
+            updateAutoFillOutput('⚠️ Auto-fill is not running. Start it first to use Place Now.');
+            return;
+          }
+
+          if (!instance.apiManager?.templateManager?.templatesArray.length || !instance.apiManager?.templateManager?.templatesShouldBeDrawn) {
+            updateAutoFillOutput('❌ No active template available for placement');
+            return;
+          }
+
+          const charges = instance.apiManager?.charges;
+          if (!charges || Math.floor(charges.count) < 1) {
+            updateAutoFillOutput('⚠️ No charges available to place now');
+            return;
+          }
+
+          const bitmap = instance.apiManager?.extraColorsBitmap || 0;
+          const ownedColors = getOwnedColorsFromBitmap(bitmap);
+          if (!ownedColors.length) {
+            updateAutoFillOutput('❌ No owned colors found');
+            return;
+          }
+
+          const pixelResult = await getNextPixels(Math.floor(charges.count), ownedColors);
+          const chunkGroups = pixelResult?.chunkGroups || [];
+          if (!chunkGroups.length) {
+            updateAutoFillOutput('✅ No pixels to place right now');
+            return;
+          }
+
+          const paintButtonResult = await waitForElement(
+            '.btn.btn-primary.btn-lg.sm\\:btn-xl.relative.z-30',
+            {
+              maxWaitTime: 100,
+              checkEnabled: true,
+              sleepInterval: 200,
+              logPrefix: 'PLACENOW',
+              description: 'paint mode button',
+              contextInfo: ''
+            }
+          );
+          if (!paintButtonResult.success) {
+            updateAutoFillOutput('❌ Place Now: paint button not found');
+            return;
+          }
+          paintButtonResult.element.click();
+          updateAutoFillOutput('✅ Place Now: opened paint menu');
+          await sleep(500);
+
+          const totalPixels = chunkGroups.reduce((sum, group) => sum + group[1].length, 0);
+          updateAutoFillOutput(`🎯 Place Now: placing ${totalPixels} pixels across ${chunkGroups.length} chunks`);
+
+          for (let i = 0; i < chunkGroups.length; i++) {
+            if (!isRunning) break; // honor stop
+            const [chunkCoords, pixels] = chunkGroups[i];
+            const [chunkX, chunkY] = chunkCoords;
+
+            // Reopen paint menu between chunks if needed
+            if (i > 0) {
+              const reopen = await waitForElement(
+                '.btn.btn-primary.btn-lg.sm\\:btn-xl.relative.z-30',
+                {
+                  maxWaitTime: 100,
+                  checkEnabled: false,
+                  sleepInterval: 200,
+                  logPrefix: 'PLACENOW',
+                  description: 'paint button',
+                  contextInfo: ` for chunk ${i + 1}`
+                }
+              );
+              if (reopen.success) {
+                reopen.element.click();
+                await sleep(200);
+              }
+            }
+
+            await placePixelsWithInterceptor(chunkCoords, pixels);
+            pixels.forEach(([logicalX, logicalY]) => placedPixels.add(`${chunkX},${chunkY},${logicalX},${logicalY}`));
+            updateAutoFillOutput(`✅ Place Now: placed ${pixels.length} in chunk (${chunkX},${chunkY})`);
+          }
+
+          updateAutoFillOutput('🎉 Place Now: batch complete');
+        } catch (e) {
+          console.error('Place Now error:', e);
+          updateAutoFillOutput(`❌ Place Now error: ${e.message}`);
+        }
+      };
+
 
       button.onclick = async () => {
         if (isRunning) {
@@ -1679,6 +1778,13 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
         }
       };
     }).buildElement()
+    .addButton({ 'id': 'bm-button-placenow', 'textContent': 'Place Now', 'disabled': true }, (instance, button) => {
+      button.onclick = () => {
+        if (typeof window.bmPlaceNow === 'function') {
+          window.bmPlaceNow();
+        }
+      };
+    }).buildElement()
     .addButton({ 'id': 'bm-button-mode', 'textContent': 'Mode: Border→Scan', 'disabled': true }, (instance, button) => {
       const modes = ['Border→Scan', 'Border→Random'];
       let currentModeIndex = 0;
@@ -1740,15 +1846,18 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
     const autoFillBtn = document.querySelector('#bm-button-autofill');
     const modeBtn = document.querySelector('#bm-button-mode');
     const protectBtn = document.querySelector('#bm-button-protect');
+  const placeNowBtn = document.querySelector('#bm-button-placenow');
     if (autoFillBtn) {
       if (overlayMain.apiManager?.templateManager?.templatesArray.length && overlayMain.apiManager?.templateManager?.templatesShouldBeDrawn) {
         autoFillBtn.disabled = false;
         modeBtn.disabled = false;
         if (protectBtn) protectBtn.disabled = false;
+    if (placeNowBtn) placeNowBtn.disabled = false;
       } else {
         autoFillBtn.disabled = true;
         modeBtn.disabled = true;
         if (protectBtn) protectBtn.disabled = true;
+    if (placeNowBtn) placeNowBtn.disabled = true;
       }
     }
   }, 0)
