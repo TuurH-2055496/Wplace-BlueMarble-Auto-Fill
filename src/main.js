@@ -1037,13 +1037,12 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
         const currentMode = modeBtn ? modeBtn.textContent.replace('Mode: ', '') : 'Border→Random';
 
         // Enhanced border detection for large templates
-        let outerBorderPixels = [];
-        let innerBorderPixels = [];
+        let borderPixels = [];
         let interiorPixels = [];
 
         if (allPixelsToPlace.length < 50000) { // Only do edge detection for smaller templates to avoid performance issues
-          console.log("PERFORMANCE: Computing enhanced border detection for template optimization");
-          updateAutoFillOutput('🔍 Computing enhanced border detection for optimal placement order...');
+          console.log("PERFORMANCE: Computing simplified border detection for template optimization");
+          updateAutoFillOutput('🔍 Computing border detection (pixels next to transparent areas)...');
           
           // Pre-compute neighbor positions for faster lookup
           const neighborOffsets = [
@@ -1054,95 +1053,66 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
 
           // Build a more efficient lookup for template pixels using global coordinates
           const globalTemplatePixels = new Set();
-          let minGlobalX = Infinity, maxGlobalX = -Infinity;
-          let minGlobalY = Infinity, maxGlobalY = -Infinity;
           
           for (const pixelKey of allTemplatePixels) {
             const [chunkX, chunkY, logicalX, logicalY] = pixelKey.split(',').map(Number);
             const globalX = (chunkX * 1000) + logicalX;
             const globalY = (chunkY * 1000) + logicalY;
             globalTemplatePixels.add(`${globalX},${globalY}`);
-            
-            // Track the template bounds for outer border detection
-            minGlobalX = Math.min(minGlobalX, globalX);
-            maxGlobalX = Math.max(maxGlobalX, globalX);
-            minGlobalY = Math.min(minGlobalY, globalY);
-            maxGlobalY = Math.max(maxGlobalY, globalY);
           }
 
-          console.log(`BORDER: Template bounds - X: ${minGlobalX}-${maxGlobalX}, Y: ${minGlobalY}-${maxGlobalY}`);
-          updateAutoFillOutput(`📐 Template bounds: ${maxGlobalX - minGlobalX + 1}×${maxGlobalY - minGlobalY + 1} pixels`);
-
-          // Enhanced border classification function
-          const classifyPixelBorder = (pixel) => {
+          // Simple border detection: pixel is on border if it has any transparent neighbor
+          const isBorderPixel = (pixel) => {
             // Convert to global coordinates (chunk size is 1000x1000)
             const globalX = (pixel.chunkX * 1000) + pixel.finalLogicalX;
             const globalY = (pixel.chunkY * 1000) + pixel.finalLogicalY;
 
-            // Check if pixel is on the absolute outer edge of the template bounds
-            const isOnOuterBound = (
-              globalX === minGlobalX || globalX === maxGlobalX ||
-              globalY === minGlobalY || globalY === maxGlobalY
-            );
-
-            // Count missing neighbors
-            let missingNeighbors = 0;
+            // Check if any neighbor position is transparent (missing from template)
             for (const [dx, dy] of neighborOffsets) {
               const neighGlobalX = globalX + dx;
               const neighGlobalY = globalY + dy;
               const neighborKey = `${neighGlobalX},${neighGlobalY}`;
 
+              // If this neighbor doesn't exist in template, current pixel is on border
               if (!globalTemplatePixels.has(neighborKey)) {
-                missingNeighbors++;
+                return true;
               }
             }
 
-            // Classification based on position and missing neighbors
-            if (isOnOuterBound && missingNeighbors > 0) {
-              return 'outer-border'; // Absolute outer edge of template
-            } else if (missingNeighbors > 0) {
-              return 'inner-border'; // Internal borders (holes, internal edges)
-            } else {
-              return 'interior'; // Completely surrounded pixels
-            }
+            return false; // All neighbors exist, so this is an interior pixel
           };
 
-          // Classify all pixels by their border type (batch process for efficiency)
+          // Classify all pixels as border or interior (batch process for efficiency)
           let processedPixels = 0;
           for (const pixel of allPixelsToPlace) {
-            const borderType = classifyPixelBorder(pixel);
-            
-            if (borderType === 'outer-border') {
-              outerBorderPixels.push(pixel);
-            } else if (borderType === 'inner-border') {
-              innerBorderPixels.push(pixel);
+            if (isBorderPixel(pixel)) {
+              borderPixels.push(pixel);
             } else {
               interiorPixels.push(pixel);
             }
             
             processedPixels++;
             if (processedPixels % 10000 === 0) {
-              updateAutoFillOutput(`⚡ Border classification progress: ${processedPixels}/${allPixelsToPlace.length}...`);
+              updateAutoFillOutput(`⚡ Border detection progress: ${processedPixels}/${allPixelsToPlace.length}...`);
               // Allow UI updates during heavy processing
               await new Promise(resolve => setTimeout(resolve, 1));
             }
           }
 
-          console.log(`BORDER: Classified pixels - Outer: ${outerBorderPixels.length}, Inner: ${innerBorderPixels.length}, Interior: ${interiorPixels.length}`);
-          updateAutoFillOutput(`✅ Border classification complete: ${outerBorderPixels.length} outer border pixels prioritized`);
+          console.log(`BORDER: Classified pixels - Border: ${borderPixels.length}, Interior: ${interiorPixels.length}`);
+          updateAutoFillOutput(`✅ Border detection complete: ${borderPixels.length} border pixels prioritized`);
         } else {
           // For very large templates, skip border detection to avoid performance issues
           console.log("PERFORMANCE: Skipping border detection for large template - using random order");
           updateAutoFillOutput('⚡ Large template detected - using optimized random placement order');
           interiorPixels = allPixelsToPlace;
-          outerBorderPixels = [];
-          innerBorderPixels = [];
+          borderPixels = [];
         }
 
         // Debug log to see what we're working with
-        console.log(`DEBUG: Total pixels to place: ${allPixelsToPlace.length}, Outer border: ${outerBorderPixels.length}, Inner border: ${innerBorderPixels.length}, Interior: ${interiorPixels.length}`);
+        console.log(`DEBUG: Total pixels to place: ${allPixelsToPlace.length}, Border: ${borderPixels.length}, Interior: ${interiorPixels.length}`);
 
-        // Sort pixels based on selected mode with enhanced border priority
+        // Sort pixels based on selected mode with border priority
         let prioritizedPixels = [];
 
         if (currentMode === 'Border→Scan') {
@@ -1162,14 +1132,13 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
             });
           };
 
-          // Priority order: Outer border → Inner border → Interior, all in scan-line order
+          // Priority order: Border → Interior, both in scan-line order
           prioritizedPixels = [
-            ...sortByScanLine([...outerBorderPixels]),
-            ...sortByScanLine([...innerBorderPixels]),
+            ...sortByScanLine([...borderPixels]),
             ...sortByScanLine([...interiorPixels])
           ];
-          console.log(`📏 Border→Scan mode: ${outerBorderPixels.length} outer border + ${innerBorderPixels.length} inner border + ${interiorPixels.length} interior pixels in scan order`);
-          updateAutoFillOutput(`📏 Border→Scan: Outer border first (${outerBorderPixels.length} pixels), then inner borders, then interior`);
+          console.log(`📏 Border→Scan mode: ${borderPixels.length} border + ${interiorPixels.length} interior pixels in scan order`);
+          updateAutoFillOutput(`📏 Border→Scan: Border first (${borderPixels.length} pixels), then interior`);
         } else { // Border→Random mode
           // Shuffle each group randomly but maintain priority order
           const shuffleArray = (array) => {
@@ -1181,14 +1150,13 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
             return shuffled;
           };
 
-          // Priority order: Outer border → Inner border → Interior, all randomized within each group
+          // Priority order: Border → Interior, both randomized within each group
           prioritizedPixels = [
-            ...shuffleArray(outerBorderPixels),
-            ...shuffleArray(innerBorderPixels),
+            ...shuffleArray(borderPixels),
             ...shuffleArray(interiorPixels)
           ];
-          console.log(`🎲 Border→Random mode: ${outerBorderPixels.length} outer border + ${innerBorderPixels.length} inner border + ${interiorPixels.length} interior pixels (randomized within groups)`);
-          updateAutoFillOutput(`🎲 Border→Random: Outer border first (${outerBorderPixels.length} pixels), then inner borders, then interior (randomized)`);
+          console.log(`🎲 Border→Random mode: ${borderPixels.length} border + ${interiorPixels.length} interior pixels (randomized within groups)`);
+          updateAutoFillOutput(`🎲 Border→Random: Border first (${borderPixels.length} pixels), then interior (randomized)`);
         }
 
         // Group pixels by chunk and apply count limit
@@ -1208,7 +1176,7 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
         }
 
 
-        console.log(`\n📊 SUMMARY: Found ${allPixelsToPlace.length} total pixels that need placement (filtered by ${ownedColors.length} owned colors), returning ${totalPixelsAdded} pixels (${outerBorderPixels.length} outer border priority)`);
+        console.log(`\n📊 SUMMARY: Found ${allPixelsToPlace.length} total pixels that need placement (filtered by ${ownedColors.length} owned colors), returning ${totalPixelsAdded} pixels (${borderPixels.length} border priority)`);
 
         // Return both the chunk groups and the total remaining pixels count
         return {
