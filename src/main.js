@@ -939,15 +939,74 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
               }
             }
 
-            // Store processed chunk data
+            // Store processed chunk data with border classification
             templatePixelCache.set(`${key}_pixels`, chunkPixels);
           }
 
-          // Cache the complete analysis
+          // BORDER DETECTION: Classify all template pixels during initial analysis
+          console.log("PERFORMANCE: Computing border detection during template analysis");
+          updateAutoFillOutput('🔍 Analyzing border pixels (pixels next to transparent areas)...');
+          
+          // Pre-compute neighbor positions for faster lookup
+          const neighborOffsets = [
+            [-1, -1], [0, -1], [1, -1], // Top row
+            [-1, 0],           [1, 0],  // Middle row (excluding center)
+            [-1, 1],  [0, 1],  [1, 1]   // Bottom row
+          ];
+
+          // Build global template pixel lookup for border detection
+          const globalTemplatePixels = new Set();
+          for (const pixelKey of allTemplatePixels) {
+            const [chunkX, chunkY, logicalX, logicalY] = pixelKey.split(',').map(Number);
+            const globalX = (chunkX * 1000) + logicalX;
+            const globalY = (chunkY * 1000) + logicalY;
+            globalTemplatePixels.add(`${globalX},${globalY}`);
+          }
+
+          // Classify border pixels during template analysis
+          const borderPixelKeys = new Set();
+          let borderCheckCount = 0;
+          
+          for (const pixelKey of allTemplatePixels) {
+            const [chunkX, chunkY, logicalX, logicalY] = pixelKey.split(',').map(Number);
+            const globalX = (chunkX * 1000) + logicalX;
+            const globalY = (chunkY * 1000) + logicalY;
+
+            // Check if any neighbor position is transparent (missing from template)
+            let isBorder = false;
+            for (const [dx, dy] of neighborOffsets) {
+              const neighGlobalX = globalX + dx;
+              const neighGlobalY = globalY + dy;
+              const neighborKey = `${neighGlobalX},${neighGlobalY}`;
+
+              // If this neighbor doesn't exist in template, current pixel is on border
+              if (!globalTemplatePixels.has(neighborKey)) {
+                isBorder = true;
+                break; // Found one missing neighbor, that's enough
+              }
+            }
+
+            if (isBorder) {
+              borderPixelKeys.add(pixelKey);
+            }
+
+            borderCheckCount++;
+            if (borderCheckCount % 25000 === 0) {
+              updateAutoFillOutput(`⚡ Border analysis progress: ${borderCheckCount}/${allTemplatePixels.size}...`);
+              // Allow UI updates during heavy processing
+              await new Promise(resolve => setTimeout(resolve, 1));
+            }
+          }
+
+          console.log(`BORDER: Analyzed ${allTemplatePixels.size} pixels, found ${borderPixelKeys.size} border pixels`);
+          updateAutoFillOutput(`✅ Border analysis complete: ${borderPixelKeys.size} border pixels identified`);
+
+          // Cache the complete analysis including border information
           templateAnalysisCache = {
             allTemplatePixels,
             templatePixelCache,
             sortedChunkKeys,
+            borderPixelKeys, // Add border classification to cache
             chunkCache: new Map() // Fresh cache for current state data
           };
           templateAnalysisCacheKey = cacheKey;
@@ -1036,78 +1095,29 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
         const modeBtn = document.querySelector('#bm-button-mode');
         const currentMode = modeBtn ? modeBtn.textContent.replace('Mode: ', '') : 'Border→Random';
 
-        // Enhanced border detection for large templates
+        // Use cached border classification from template analysis
+        updateAutoFillOutput('🎯 Using cached border analysis for optimal placement order...');
+        
+        console.log("getNextPixels: Using cached border detection results");
         let borderPixels = [];
         let interiorPixels = [];
 
-        if (allPixelsToPlace.length < 50000) { // Only do edge detection for smaller templates to avoid performance issues
-          console.log("PERFORMANCE: Computing simplified border detection for template optimization");
-          updateAutoFillOutput('🔍 Computing border detection (pixels next to transparent areas)...');
+        // Extract border classification from cached analysis
+        const cachedBorderPixelKeys = templateAnalysisCache.borderPixelKeys;
+        
+        // Convert pixels to their key format and split based on cached border classification
+        for (const pixel of allPixelsToPlace) {
+          const pixelKey = `${pixel.chunkX},${pixel.chunkY},${pixel.finalLogicalX},${pixel.finalLogicalY}`;
           
-          // Pre-compute neighbor positions for faster lookup
-          const neighborOffsets = [
-            [-1, -1], [0, -1], [1, -1], // Top row
-            [-1, 0],           [1, 0],  // Middle row (excluding center)
-            [-1, 1],  [0, 1],  [1, 1]   // Bottom row
-          ];
-
-          // Build a more efficient lookup for template pixels using global coordinates
-          const globalTemplatePixels = new Set();
-          
-          for (const pixelKey of allTemplatePixels) {
-            const [chunkX, chunkY, logicalX, logicalY] = pixelKey.split(',').map(Number);
-            const globalX = (chunkX * 1000) + logicalX;
-            const globalY = (chunkY * 1000) + logicalY;
-            globalTemplatePixels.add(`${globalX},${globalY}`);
+          if (cachedBorderPixelKeys.has(pixelKey)) {
+            borderPixels.push(pixel);
+          } else {
+            interiorPixels.push(pixel);
           }
-
-          // Simple border detection: pixel is on border if it has any transparent neighbor
-          const isBorderPixel = (pixel) => {
-            // Convert to global coordinates (chunk size is 1000x1000)
-            const globalX = (pixel.chunkX * 1000) + pixel.finalLogicalX;
-            const globalY = (pixel.chunkY * 1000) + pixel.finalLogicalY;
-
-            // Check if any neighbor position is transparent (missing from template)
-            for (const [dx, dy] of neighborOffsets) {
-              const neighGlobalX = globalX + dx;
-              const neighGlobalY = globalY + dy;
-              const neighborKey = `${neighGlobalX},${neighGlobalY}`;
-
-              // If this neighbor doesn't exist in template, current pixel is on border
-              if (!globalTemplatePixels.has(neighborKey)) {
-                return true;
-              }
-            }
-
-            return false; // All neighbors exist, so this is an interior pixel
-          };
-
-          // Classify all pixels as border or interior (batch process for efficiency)
-          let processedPixels = 0;
-          for (const pixel of allPixelsToPlace) {
-            if (isBorderPixel(pixel)) {
-              borderPixels.push(pixel);
-            } else {
-              interiorPixels.push(pixel);
-            }
-            
-            processedPixels++;
-            if (processedPixels % 10000 === 0) {
-              updateAutoFillOutput(`⚡ Border detection progress: ${processedPixels}/${allPixelsToPlace.length}...`);
-              // Allow UI updates during heavy processing
-              await new Promise(resolve => setTimeout(resolve, 1));
-            }
-          }
-
-          console.log(`BORDER: Classified pixels - Border: ${borderPixels.length}, Interior: ${interiorPixels.length}`);
-          updateAutoFillOutput(`✅ Border detection complete: ${borderPixels.length} border pixels prioritized`);
-        } else {
-          // For very large templates, skip border detection to avoid performance issues
-          console.log("PERFORMANCE: Skipping border detection for large template - using random order");
-          updateAutoFillOutput('⚡ Large template detected - using optimized random placement order');
-          interiorPixels = allPixelsToPlace;
-          borderPixels = [];
         }
+
+        console.log(`getNextPixels: Using cached results - ${borderPixels.length} border pixels, ${interiorPixels.length} interior pixels`);
+        updateAutoFillOutput(`✅ Border placement strategy: ${borderPixels.length} border pixels first, then ${interiorPixels.length} interior pixels`);
 
         // Debug log to see what we're working with
         console.log(`DEBUG: Total pixels to place: ${allPixelsToPlace.length}, Border: ${borderPixels.length}, Interior: ${interiorPixels.length}`);
