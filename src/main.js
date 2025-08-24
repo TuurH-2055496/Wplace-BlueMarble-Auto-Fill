@@ -1054,7 +1054,7 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
 
           // Fetch current chunk data if not already cached
           const chunkKey = `${chunkX},${chunkY}`;
-          if (!chunkCache.has(chunkKey)) {
+          if (!chunkCache.has(chunkKey) || 1) { // never cache --> could be updated by others or griefed
             const currentChunk = await fetchChunkData(chunkX, chunkY);
             chunkCache.set(chunkKey, currentChunk);
           }
