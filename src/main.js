@@ -1442,19 +1442,13 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
           button.textContent = 'Auto Fill';
           updateAutoFillOutput('⏹️ Auto-fill stopped by user');
 
-          // Also stop protection mode if it's running
-          console.log("AUTOFILL: Stopping protection mode if active");
+          // Clear protection interval but keep protection mode enabled
+          // This allows protection to restart when auto-fill is restarted
           if (window.bmProtectionInterval) {
-            console.log("AUTOFILL: Protection mode stopped");
+            console.log("AUTOFILL: Clearing protection interval (keeping protection mode enabled)");
             clearInterval(window.bmProtectionInterval);
             window.bmProtectionInterval = null;
-            window.bmProtectMode = false;
-            isRunning = false;
-            const protectBtn = document.querySelector('#bm-button-protect');
-            if (protectBtn) {
-              protectBtn.textContent = 'Protect: Off';
-            }
-            updateAutoFillOutput('🛡️ Protection mode stopped by user');
+            updateAutoFillOutput('🛡️ Protection monitoring paused (will resume when auto-fill restarts)');
           }
 
           return;
@@ -1835,12 +1829,14 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
           instance.handleDisplayStatus('🛡️ Protection monitoring stopped');
         }
 
-        // When turning protection off, check if auto-fill button says "Stop Fill" and reset it
-        if (!isProtectModeOn) {
+        // When turning protection off, only stop auto-fill if it's currently running protection
+        // This prevents interference when auto-fill is running in normal mode
+        if (!isProtectModeOn && window.bmProtectionInterval) {
           const autoFillBtn = document.querySelector('#bm-button-autofill');
           if (autoFillBtn && autoFillBtn.textContent === 'Stop Fill') {
-            autoFillBtn.click()
-            instance.handleDisplayStatus('🔄 Auto-fill button reset');
+            updateAutoFillOutput('🛡️ Protection disabled - stopping auto-fill');
+            autoFillBtn.click();
+            instance.handleDisplayStatus('🔄 Auto-fill stopped due to protection disable');
           }
         }
       };
