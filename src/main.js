@@ -499,10 +499,11 @@ function buildOverlayMain() {
         instance.apiManager?.templateManager?.setTemplatesShouldBeDrawn(true);
         instance.handleDisplayStatus(`Enabled templates!`);
         // Enable auto-fill button when templates are enabled
-        const autoFillBtn = document.querySelector('#bm-button-autofill');
-        const modeBtn = document.querySelector('#bm-button-mode');
-        const protectBtn = document.querySelector('#bm-button-protect');
-        const placeNowBtn = document.querySelector('#bm-button-placenow');
+  const autoFillBtn = document.querySelector('#bm-button-autofill');
+  const modeBtn = document.querySelector('#bm-button-mode');
+  const protectBtn = document.querySelector('#bm-button-protect');
+  const placeNowBtn = document.querySelector('#bm-button-placenow');
+  const sleepBtn = document.querySelector('#bm-button-sleep');
         if (instance.apiManager?.templateManager?.templatesArray.length && instance.apiManager?.templateManager?.templatesShouldBeDrawn) {
           if (autoFillBtn) {
             autoFillBtn.disabled = false;
@@ -515,6 +516,9 @@ function buildOverlayMain() {
           }
           if (placeNowBtn) {
             placeNowBtn.disabled = false;
+          }
+          if (sleepBtn) {
+            sleepBtn.disabled = false;
           }
 
         }
@@ -562,6 +566,7 @@ function buildOverlayMain() {
         const modeBtn = document.querySelector('#bm-button-mode');
         const protectBtn = document.querySelector('#bm-button-protect');
         const placeNowBtn = document.querySelector('#bm-button-placenow');
+        const sleepBtn = document.querySelector('#bm-button-sleep');
         if (autoFillBtn) {
           autoFillBtn.disabled = true;
         }
@@ -574,7 +579,19 @@ function buildOverlayMain() {
         if (placeNowBtn) {
           placeNowBtn.disabled = true;
         }
+        if (sleepBtn) {
+          sleepBtn.disabled = true;
+        }
       }
+    }).buildElement()
+    .addButton({ 'id': 'bm-button-sleep', 'textContent': 'Sleep Mode: Off', 'disabled': true }, (instance, button) => {
+      let isSleepModeOn = false;
+      button.onclick = () => {
+        isSleepModeOn = !isSleepModeOn;
+        window.bmSleepMode = isSleepModeOn;
+        button.textContent = `Sleep Mode: ${isSleepModeOn ? 'On' : 'Off'}`;
+        instance.handleDisplayStatus(`💤 Sleep mode ${isSleepModeOn ? 'enabled' : 'disabled'}`);
+      };
     }).buildElement()
     .addButton({ 'id': 'bm-button-autofill', 'textContent': 'Auto Fill', 'disabled': true }, (instance, button) => {
       let isRunning = false;
@@ -1593,38 +1610,44 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
               console.log(`AUTOFILL: Waiting ${(totalWaitTime / 1000).toFixed(1)}s for ${chargesNeeded} charges`);
               updateAutoFillOutput(`⏱️ Precise timing: ${charges.count.toFixed(3)}/${charges.max} charges, waiting ${formatTime(totalWaitTime / 1000)}`);
 
-              // Wait with progress updates every second and user data refresh every 10 seconds
-              const startTime = Date.now();
-              const endTime = startTime + totalWaitTime;
-              let iterationCount = 0;
+              if (window.bmSleepMode) {
+                // Low-power sleep: single await to minimize CPU work
+                updateAutoFillOutput(`💤 Sleep mode: pausing for ${formatTime(totalWaitTime / 1000)} until enough charges`);
+                await sleep(totalWaitTime);
+              } else {
+                // Default behavior: periodic updates and refreshes
+                const startTime = Date.now();
+                const endTime = startTime + totalWaitTime;
+                let iterationCount = 0;
 
-              while (Date.now() < endTime && isRunning) {
-                const remaining = Math.max(0, endTime - Date.now());
-                iterationCount++;
+                while (Date.now() < endTime && isRunning) {
+                  const remaining = Math.max(0, endTime - Date.now());
+                  iterationCount++;
 
-                // Refresh user data every 10 seconds (10 iterations)
-                if (iterationCount % 10 === 0) {
-                  console.log(`AUTOFILL: 10 seconds elapsed (iteration ${iterationCount}), refreshing user data`);
-                  updateAutoFillOutput(`🔄 ${iterationCount}s elapsed - checking charges via data refresh`);
-                  await instance.apiManager.fetchUserData();
+                  // Refresh user data every 10 seconds (10 iterations)
+                  if (iterationCount % 10 === 0) {
+                    console.log(`AUTOFILL: 10 seconds elapsed (iteration ${iterationCount}), refreshing user data`);
+                    updateAutoFillOutput(`🔄 ${iterationCount}s elapsed - checking charges via data refresh`);
+                    await instance.apiManager.fetchUserData();
 
-                  // Check if we now have enough charges after the refresh
-                  const updatedCharges = instance.apiManager?.charges;
-                  if (updatedCharges && updatedCharges.count >= updatedCharges.max) {
-                    console.log("AUTOFILL: Charges are now full after refresh, breaking wait loop");
-                    updateAutoFillOutput("✅ Charges full after refresh - proceeding immediately!");
-                    break;
-                  } else {
-                    console.log(`AUTOFILL: After refresh - charges: ${updatedCharges?.count.toFixed(3)}/${updatedCharges?.max}, continuing wait`);
-                    updateAutoFillOutput(`📊 Refresh result: ${updatedCharges?.count.toFixed(3)}/${updatedCharges?.max} charges, continuing wait`);
+                    // Check if we now have enough charges after the refresh
+                    const updatedCharges = instance.apiManager?.charges;
+                    if (updatedCharges && updatedCharges.count >= updatedCharges.max) {
+                      console.log("AUTOFILL: Charges are now full after refresh, breaking wait loop");
+                      updateAutoFillOutput("✅ Charges full after refresh - proceeding immediately!");
+                      break;
+                    } else {
+                      console.log(`AUTOFILL: After refresh - charges: ${updatedCharges?.count.toFixed(3)}/${updatedCharges?.max}, continuing wait`);
+                      updateAutoFillOutput(`📊 Refresh result: ${updatedCharges?.count.toFixed(3)}/${updatedCharges?.max} charges, continuing wait`);
+                    }
                   }
+
+                  const remainingTime = formatTime(remaining / 1000);
+                  updateAutoFillOutput(`⏳ Charging ${remainingTime} remaining`);
+
+                  // Sleep for 1 second or until the end time, whichever is shorter
+                  await sleep(Math.min(1000, remaining));
                 }
-
-                const remainingTime = formatTime(remaining / 1000);
-                updateAutoFillOutput(`⏳ Charging ${remainingTime} remaining`);
-
-                // Sleep for 1 second or until the end time, whichever is shorter
-                await sleep(Math.min(1000, remaining));
               }
 
               if (!isRunning) {
@@ -1847,17 +1870,20 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
     const modeBtn = document.querySelector('#bm-button-mode');
     const protectBtn = document.querySelector('#bm-button-protect');
   const placeNowBtn = document.querySelector('#bm-button-placenow');
+  const sleepBtn = document.querySelector('#bm-button-sleep');
     if (autoFillBtn) {
       if (overlayMain.apiManager?.templateManager?.templatesArray.length && overlayMain.apiManager?.templateManager?.templatesShouldBeDrawn) {
         autoFillBtn.disabled = false;
         modeBtn.disabled = false;
         if (protectBtn) protectBtn.disabled = false;
     if (placeNowBtn) placeNowBtn.disabled = false;
+    if (sleepBtn) sleepBtn.disabled = false;
       } else {
         autoFillBtn.disabled = true;
         modeBtn.disabled = true;
         if (protectBtn) protectBtn.disabled = true;
     if (placeNowBtn) placeNowBtn.disabled = true;
+    if (sleepBtn) sleepBtn.disabled = true;
       }
     }
   }, 0)
