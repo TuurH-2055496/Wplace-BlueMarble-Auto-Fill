@@ -1031,8 +1031,7 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
             allTemplatePixels,
             templatePixelCache,
             sortedChunkKeys,
-            borderPixelKeys, // Add border classification to cache
-            chunkCache: new Map() // Fresh cache for current state data
+            borderPixelKeys // Border classification cached for optimization
           };
           templateAnalysisCacheKey = cacheKey;
           
@@ -1044,7 +1043,10 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
 
         // Use cached analysis
         const { allTemplatePixels, templatePixelCache, sortedChunkKeys } = templateAnalysisCache;
-        const chunkCache = templateAnalysisCache.chunkCache;
+        // Always use a fresh chunk cache to ensure we get the latest server state
+        // This is critical for protection mode to detect changes
+        const chunkCache = new Map();
+        console.log("CACHE: Using fresh chunk cache for server state - protection mode will detect all changes");
 
         // Collect pixels that need placement by checking current state
         const allPixelsToPlace = [];
@@ -1442,15 +1444,6 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
           button.textContent = 'Auto Fill';
           updateAutoFillOutput('⏹️ Auto-fill stopped by user');
 
-          // Clear protection interval but keep protection mode enabled
-          // This allows protection to restart when auto-fill is restarted
-          if (window.bmProtectionInterval) {
-            console.log("AUTOFILL: Clearing protection interval (keeping protection mode enabled)");
-            clearInterval(window.bmProtectionInterval);
-            window.bmProtectionInterval = null;
-            updateAutoFillOutput('🛡️ Protection monitoring paused (will resume when auto-fill restarts)');
-          }
-
           return;
         }
 
@@ -1500,19 +1493,31 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
               updateAutoFillOutput('🎉 Template completed! All owned color pixels placed.');
               updateProgressDisplay(0); // Show completion
 
-              // Start protection mode if enabled
+              // If protection mode is enabled, transition to protection monitoring
+              // Otherwise, stop auto-fill completely
               if (window.bmProtectMode) {
-                console.log("AUTOFILL: Starting protection mode - monitoring");
-                updateAutoFillOutput('🛡️ Protection mode active - monitoring template');
-                // Ensure auto-fill is not considered running while monitoring
-                isRunning = false;
-                // Keep the button ready to start when protection detects damage
-                button.textContent = 'Auto Fill';
+                console.log("AUTOFILL: Transitioning to protection mode - monitoring");
+                updateAutoFillOutput('🛡️ Protection mode active - monitoring template for damage');
+                // Keep auto-fill running but in monitoring mode
+                // Don't change button text - keep it as "Stop Fill" since protection is active
 
-                const protectionInterval = setInterval(async () => {
+                // Keep auto-fill running but in monitoring mode
+                // Don't change button text - keep it as "Stop Fill" since protection is active
+
+                // Enter protection monitoring loop within auto-fill
+                while (isRunning && window.bmProtectMode) {
                   try {
                     console.log("PROTECT: Checking template integrity...");
                     updateAutoFillOutput('🔍 Checking template integrity...');
+
+                    // Wait 10 seconds between checks
+                    await sleep(10000);
+
+                    // Check if protection mode was disabled or auto-fill was stopped
+                    if (!isRunning || !window.bmProtectMode) {
+                      console.log("PROTECT: Protection mode disabled or auto-fill stopped");
+                      break;
+                    }
 
                     // Get owned colors from bitmap
                     const bitmap = instance.apiManager?.extraColorsBitmap || 0;
@@ -1520,7 +1525,7 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
 
                     if (ownedColors.length === 0) {
                       console.log("PROTECT: No owned colors found, skipping check");
-                      return;
+                      continue;
                     }
 
                     // Check if there are pixels that need fixing
@@ -1536,17 +1541,10 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
                         const pixelsToFix = Math.min(Math.floor(charges.count), checkResult.totalRemainingPixels);
                         console.log(`PROTECT: Attempting to fix ${pixelsToFix} pixels with ${Math.floor(charges.count)} charges`);
                         updateAutoFillOutput(`🔧 Fixing ${pixelsToFix} pixels with available charges...`);
-
-                        // Restart auto-fill by clicking the button
-                        clearInterval(protectionInterval);
-                        // Ensure the global interval reference is cleared
-                        if (window.bmProtectionInterval) {
-                          window.bmProtectionInterval = null;
-                        }
-                        updateAutoFillOutput('🛡️ Protection mode: Restarting auto-fill to fix damaged pixels');
-                        // Make sure we go through the "start" path, not the "stop" path
-                        isRunning = false;
-                        button.click(); // This will restart the auto-fill
+                        
+                        // Break out of protection loop to restart auto-fill cycle
+                        updateAutoFillOutput('🛡️ Protection mode: Restarting placement cycle to fix damaged pixels');
+                        break;
                       } else {
                         console.log("PROTECT: No charges available for immediate fixing");
                         updateAutoFillOutput('⚠️ Damage detected but no charges available for fixing');
@@ -1559,12 +1557,19 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
                     console.error('PROTECT: Error during protection check:', error);
                     updateAutoFillOutput(`❌ Protection error: ${error.message}`);
                   }
-                }, 10000); // Check every 10 seconds
+                }
 
-                // Store interval globally so it can be stopped if protect mode is disabled
-                window.bmProtectionInterval = protectionInterval;
+                // If we exited protection loop but auto-fill is still running, 
+                // continue with normal auto-fill cycle
+                if (isRunning && window.bmProtectMode) {
+                  console.log("PROTECT: Damage detected, continuing with auto-fill cycle");
+                  continue; // Go back to start of auto-fill while loop
+                } else {
+                  console.log("AUTOFILL: Protection disabled or stopped, exiting");
+                  break; // Exit auto-fill completely
+                }
               } else {
-                // If protection mode is not enabled, reset button text to "Auto Fill"
+                // If protection mode is not enabled, stop auto-fill completely
                 button.textContent = 'Auto Fill';
                 isRunning = false;
               }
@@ -1822,16 +1827,16 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
         // Store the protect mode state globally so auto-fill can access it
         window.bmProtectMode = isProtectModeOn;
 
-        // Clear any existing protection interval when disabling
-        if (!isProtectModeOn && window.bmProtectionInterval) {
-          clearInterval(window.bmProtectionInterval);
-          window.bmProtectionInterval = null;
-          instance.handleDisplayStatus('🛡️ Protection monitoring stopped');
+        // When enabling protection mode while auto-fill is not running, show info message
+        if (isProtectModeOn) {
+          const autoFillBtn = document.querySelector('#bm-button-autofill');
+          if (!autoFillBtn || autoFillBtn.textContent !== 'Stop Fill') {
+            instance.handleDisplayStatus('🛡️ Protection enabled - will activate when auto-fill starts');
+          }
         }
 
-        // When turning protection off, only stop auto-fill if it's currently running protection
-        // This prevents interference when auto-fill is running in normal mode
-        if (!isProtectModeOn && window.bmProtectionInterval) {
+        // When turning protection off, stop auto-fill if it's currently running
+        if (!isProtectModeOn) {
           const autoFillBtn = document.querySelector('#bm-button-autofill');
           if (autoFillBtn && autoFillBtn.textContent === 'Stop Fill') {
             updateAutoFillOutput('🛡️ Protection disabled - stopping auto-fill');
