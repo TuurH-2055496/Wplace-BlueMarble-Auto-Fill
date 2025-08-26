@@ -1425,6 +1425,7 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
             }
 
             await placePixelsWithInterceptor(chunkCoords, pixels);
+            await sleep(500);
             pixels.forEach(([logicalX, logicalY]) => placedPixels.add(`${chunkX},${chunkY},${logicalX},${logicalY}`));
             updateAutoFillOutput(`✅ Place Now: placed ${pixels.length} in chunk (${chunkX},${chunkY})`);
           }
@@ -1776,6 +1777,7 @@ Memory: Template analysis ${templateAnalysisCache ? 'cached' : 'not cached'}`;
               console.log(`AUTOFILL: Processing chunk ${chunkX},${chunkY} with ${pixels.length} pixels`);
               updateAutoFillOutput(`🔄 Placing ${pixels.length} pixels in chunk ${chunkX},${chunkY}...`);
               await placePixelsWithInterceptor(chunkCoords, pixels);
+              await sleep(500);
               console.log("AUTOFILL: Finished Intercept")
               pixels.forEach(([logicalX, logicalY]) => placedPixels.add(`${chunkX},${chunkY},${logicalX},${logicalY}`));
               updateAutoFillOutput(`✅ Placed ${pixels.length} pixels in chunk (${chunkX},${chunkY})`);
