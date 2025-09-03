@@ -199,6 +199,227 @@ observeBlack(); // Observes the black palette color
 
 consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflowerblue;', '');
 
+// ==================== SIMPLE AUTO-FILL ON LOAD (ONE CHUNK) ====================
+// Wait 5 seconds after load; if there's a template, place all missing pixels from the first
+// chunk (top->bottom, left->right) with a single paint request. No edge detection/extras.
+// Skips pixels already matching on the board.
+(function setupAutoFillOnLoad() {
+  let started = false;
+
+  const colorMap = {
+    0: [0, 0, 0, 0], 1: [0, 0, 0, 255], 2: [60, 60, 60, 255], 3: [120, 120, 120, 255],
+    4: [210, 210, 210, 255], 5: [255, 255, 255, 255], 6: [96, 0, 24, 255], 7: [237, 28, 36, 255],
+    8: [255, 127, 39, 255], 9: [246, 170, 9, 255], 10: [249, 221, 59, 255], 11: [255, 250, 188, 255],
+    12: [14, 185, 104, 255], 13: [19, 230, 123, 255], 14: [135, 255, 94, 255], 15: [12, 129, 110, 255],
+    16: [16, 174, 166, 255], 17: [19, 225, 190, 255], 18: [40, 80, 158, 255], 19: [64, 147, 228, 255],
+    20: [96, 247, 242, 255], 21: [107, 80, 246, 255], 22: [153, 177, 251, 255], 23: [120, 12, 153, 255],
+    24: [170, 56, 185, 255], 25: [224, 159, 249, 255], 26: [203, 0, 122, 255], 27: [236, 31, 128, 255],
+    28: [243, 141, 169, 255], 29: [104, 70, 52, 255], 30: [149, 104, 42, 255], 31: [248, 178, 119, 255],
+    32: [170, 170, 170, 255], 33: [165, 14, 30, 255], 34: [250, 128, 114, 255], 35: [228, 92, 26, 255],
+    36: [214, 181, 148, 255], 37: [156, 132, 49, 255], 38: [197, 173, 49, 255], 39: [232, 212, 95, 255],
+    40: [74, 107, 58, 255], 41: [90, 148, 74, 255], 42: [132, 197, 115, 255], 43: [15, 121, 159, 255],
+    44: [187, 250, 242, 255], 45: [125, 199, 255, 255], 46: [77, 49, 184, 255], 47: [74, 66, 132, 255],
+    48: [122, 113, 196, 255], 49: [181, 174, 241, 255], 50: [219, 164, 99, 255], 51: [209, 128, 81, 255],
+    52: [255, 197, 165, 255], 53: [155, 82, 73, 255], 54: [209, 128, 120, 255], 55: [250, 182, 164, 255],
+    56: [123, 99, 82, 255], 57: [156, 132, 107, 255], 58: [51, 57, 65, 255], 59: [109, 117, 141, 255],
+    60: [179, 185, 209, 255], 61: [109, 100, 63, 255], 62: [148, 140, 107, 255], 63: [205, 197, 158, 255]
+  };
+
+  const getColorIdFromRGB = (r, g, b, a) => {
+    if (a === 0) return 0;
+    let min = Infinity, id = 1;
+    for (const [key, [cr, cg, cb]] of Object.entries(colorMap)) {
+      if (key === '0') continue;
+      const d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2;
+      if (d < min) { min = d; id = parseInt(key); }
+    }
+    return id;
+  };
+
+  const fetchChunkData = async (chunkX, chunkY) => {
+    try {
+      const res = await fetch(`https://backend.wplace.live/files/s0/tiles/${chunkX}/${chunkY}.png`);
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      return await createImageBitmap(blob);
+    } catch { return null; }
+  };
+
+  const waitForElement = async (selector, checkEnabled = false, maxWaitMs = 20000) => {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const el = document.querySelector(selector);
+      if (el && (!checkEnabled || !el.disabled)) return el;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return null;
+  };
+
+  const interceptAndPlace = async (chunkX, chunkY, pixels) => {
+    if (!pixels?.length) return;
+    const originalFetch = unsafeWindow.fetch;
+    let active = true;
+
+    const requestBodyBuilder = (originalBody, token, url) => {
+      return {
+        newBody: {
+          colors: pixels.map(([, , c]) => c),
+          coords: pixels.flatMap(([x, y]) => [x, y]),
+          t: token
+        },
+        newUrl: `https://backend.wplace.live/s0/pixel/${chunkX}/${chunkY}`
+      };
+    };
+
+    const triggerAction = async () => {
+      // Open paint menu
+      const paintBtn = await waitForElement('.btn.btn-primary.btn-lg.sm\\:btn-xl.relative.z-30', true, 20000);
+      if (!paintBtn) throw new Error('Paint button not found');
+      paintBtn.click();
+      await new Promise(r => setTimeout(r, 300));
+
+      // Select a pixel on the canvas to enable final placement
+      const canvas = document.querySelector('.maplibregl-canvas');
+      if (!canvas) throw new Error('Map canvas not found');
+      const cx = Math.floor(window.innerWidth / 2);
+      const cy = Math.floor(window.innerHeight / 2);
+      for (const type of ['mousedown', 'click', 'mouseup']) {
+        const ev = new MouseEvent(type, { clientX: cx, clientY: cy, bubbles: true });
+        canvas.dispatchEvent(ev);
+        await new Promise(r => setTimeout(r, 50));
+      }
+
+      // Click final confirm
+      const finalBtn = await waitForElement('.btn.btn-primary.btn-lg.sm\\:btn-xl.relative', true, 20000);
+      if (!finalBtn) throw new Error('Final button not found');
+      finalBtn.click();
+    };
+
+    return new Promise(async (resolve, reject) => {
+      unsafeWindow.fetch = async (...args) => {
+        const url = args[0];
+        const options = args[1] || {};
+        const method = (options.method || 'GET').toUpperCase();
+        if (!active) return originalFetch.apply(unsafeWindow, args);
+        if (method === 'POST' && typeof url === 'string' && url.includes('/pixel/')) {
+          try {
+            const originalBody = JSON.parse(options.body);
+            const token = originalBody['t'];
+            const { newBody, newUrl } = requestBodyBuilder(originalBody, token, url);
+            active = false; unsafeWindow.fetch = originalFetch;
+            const result = await originalFetch.call(unsafeWindow, newUrl, { ...options, body: JSON.stringify(newBody) });
+            resolve(result);
+            return result;
+          } catch (e) { active = false; unsafeWindow.fetch = originalFetch; reject(e); }
+        }
+        return originalFetch.apply(unsafeWindow, args);
+      };
+      try { await triggerAction(); } catch (e) { unsafeWindow.fetch = originalFetch; reject(e); }
+    });
+  };
+
+  const findFirstChunkPixels = async (template) => {
+    const chunked = template?.chunked;
+    if (!chunked) return null;
+    // Sort keys by chunkY, chunkX, then tile pixel Y, X
+    const keys = Object.keys(chunked).sort((a, b) => {
+      const [ax, ay, apx, apy] = a.split(',').map(Number);
+      const [bx, by, bpx, bpy] = b.split(',').map(Number);
+      if (ay !== by) return ay - by;
+      if (ax !== bx) return ax - bx;
+      if (apy !== bpy) return apy - bpy;
+      return apx - bpx;
+    });
+
+    for (const key of keys) {
+      const [chunkX, chunkY, tilePxX, tilePxY] = key.split(',').map(Number);
+      const tmplBitmap = chunked[key];
+      if (!tmplBitmap) continue;
+
+      // Current board state for this chunk
+      const boardBmp = await fetchChunkData(chunkX, chunkY);
+      let boardData = null;
+      if (boardBmp) {
+        const c = new OffscreenCanvas(boardBmp.width, boardBmp.height);
+        const ctx = c.getContext('2d');
+        ctx.drawImage(boardBmp, 0, 0);
+        boardData = ctx.getImageData(0, 0, boardBmp.width, boardBmp.height);
+      }
+
+      // Template image data
+      const tc = new OffscreenCanvas(tmplBitmap.width, tmplBitmap.height);
+      const tctx = tc.getContext('2d');
+      tctx.drawImage(tmplBitmap, 0, 0);
+      const tData = tctx.getImageData(0, 0, tmplBitmap.width, tmplBitmap.height);
+
+      const pixels = [];
+      // Scan center points of 3x3 blocks, row-major (top->bottom, left->right)
+      for (let y = 1; y < tmplBitmap.height; y += 3) {
+        for (let x = 1; x < tmplBitmap.width; x += 3) {
+          const idx = (y * tmplBitmap.width + x) * 4;
+          const a = tData.data[idx + 3];
+          if (a === 0) continue; // transparent in template
+          const r = tData.data[idx], g = tData.data[idx + 1], b = tData.data[idx + 2];
+          const colorId = getColorIdFromRGB(r, g, b, a);
+
+          const logicalX = tilePxX + Math.floor((x - 1) / 3);
+          const logicalY = tilePxY + Math.floor((y - 1) / 3);
+
+          // Skip if board already matches
+          if (boardData && logicalX >= 0 && logicalX < boardData.width && logicalY >= 0 && logicalY < boardData.height) {
+            const bIdx = (logicalY * boardData.width + logicalX) * 4;
+            const br = boardData.data[bIdx], bg = boardData.data[bIdx + 1], bb = boardData.data[bIdx + 2], ba = boardData.data[bIdx + 3];
+            const bColor = getColorIdFromRGB(br, bg, bb, ba);
+            if (bColor === colorId) continue;
+          }
+
+          pixels.push([logicalX, logicalY, colorId]);
+        }
+      }
+
+      if (pixels.length) {
+        // Ensure scanline order: Y then X
+        pixels.sort((p1, p2) => (p1[1] - p2[1]) || (p1[0] - p2[0]));
+        return { chunkCoords: [chunkX, chunkY], pixels };
+      }
+    }
+
+    return null;
+  };
+
+  const start = async () => {
+    if (started) return; started = true;
+    // Guard: need active template and drawing enabled
+    const tm = overlayMain?.apiManager?.templateManager;
+    if (!tm?.templatesArray?.length || !tm?.templatesShouldBeDrawn) return;
+
+    const template = tm.templatesArray[0];
+    // Ensure we know the current charges
+    try { await overlayMain?.apiManager?.fetchUserData?.(); } catch {}
+    const charges = overlayMain?.apiManager?.charges;
+    const available = Math.max(0, Math.floor(charges?.count || 0));
+    if (available <= 0) { return; }
+
+    const job = await findFirstChunkPixels(template);
+    if (!job) return; // nothing to do
+
+    const [cx, cy] = job.chunkCoords;
+    // Cap to available charges to avoid server errors
+    if (job.pixels.length > available) {
+      job.pixels = job.pixels.slice(0, available);
+    }
+    console.log(`AUTOLOAD: Placing ${job.pixels.length} pixels (<= ${available} charges) in one request for chunk (${cx},${cy})`);
+    try {
+      await interceptAndPlace(cx, cy, job.pixels);
+      console.log('AUTOLOAD: Placement request sent');
+    } catch (e) {
+      console.error('AUTOLOAD: Placement failed', e);
+    }
+  };
+
+  setTimeout(start, 5000);
+})();
+
 /** Observe the black color, and add the "Move" button.
  * @since 0.66.3
  */
