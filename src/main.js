@@ -255,6 +255,43 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
     return null;
   };
 
+  // Try to clear common captcha prompts by clicking obvious buttons.
+  const ensureCaptchaCleared = async (maxWaitMs = 5000) => {
+    const start = Date.now();
+    const tryClickTextMatch = (texts) => {
+      const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
+      for (const el of candidates) {
+        const txt = (el.textContent || el.value || '').toLowerCase();
+        if (!txt) continue;
+        if (texts.some(t => txt.includes(t))) {
+          try { el.click(); return true; } catch {}
+        }
+      }
+      return false;
+    };
+
+    // Quick pass first
+    if (tryClickTextMatch(['human', 'verify', 'robot', 'continue'])) return true;
+
+    // Poll briefly for dynamic captchas/modals
+    while (Date.now() - start < maxWaitMs) {
+      // Cloudflare/Turnstile wrappers
+      const cfWrap = document.querySelector('.cf-challenge, .cf-turnstile, #challenge-stage');
+      if (cfWrap) {
+        if (tryClickTextMatch(['verify', 'continue'])) return true;
+      }
+
+      // Generic modal dialogs
+      const modal = document.querySelector('[class*="modal" i], [role="dialog"]');
+      if (modal) {
+        if (tryClickTextMatch(['human', 'verify', 'continue'])) return true;
+      }
+
+      await new Promise(r => setTimeout(r, 300));
+    }
+    return false;
+  };
+
   const interceptAndPlace = async (chunkX, chunkY, pixels) => {
     if (!pixels?.length) return;
     const originalFetch = unsafeWindow.fetch;
@@ -272,6 +309,8 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
     };
 
     const triggerAction = async () => {
+      // Clear captcha first, if any
+      try { await ensureCaptchaCleared(6000); } catch {}
       // Open paint menu
       const paintBtn = await waitForElement('.btn.btn-primary.btn-lg.sm\\:btn-xl.relative.z-30', true, 20000);
       if (!paintBtn) throw new Error('Paint button not found');
@@ -288,6 +327,9 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
         canvas.dispatchEvent(ev);
         await new Promise(r => setTimeout(r, 50));
       }
+
+      // Clear captcha again if it appeared after opening paint
+      try { await ensureCaptchaCleared(6000); } catch {}
 
       // Click final confirm
       const finalBtn = await waitForElement('.btn.btn-primary.btn-lg.sm\\:btn-xl.relative', true, 20000);
@@ -394,7 +436,23 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
     if (!tm?.templatesArray?.length || !tm?.templatesShouldBeDrawn) return;
 
     const template = tm.templatesArray[0];
-    // Ensure we know the current charges
+    // Ensure we know the current user and charges
+    let userOk = false;
+    try {
+      const userData = await overlayMain?.apiManager?.fetchUserData?.();
+      if (userData && (userData.id !== undefined && userData.id !== null)) {
+        userOk = true;
+      }
+    } catch {}
+
+    // If no user detected after the 5s wait, refresh the page to recover
+    if (!userOk) {
+      console.warn('AUTOLOAD: No user detected after wait, reloading page...');
+      try { location.reload(); } catch {}
+      return;
+    }
+
+    // Get charges after user confirmed
     try { await overlayMain?.apiManager?.fetchUserData?.(); } catch {}
     const charges = overlayMain?.apiManager?.charges;
     const available = Math.max(0, Math.floor(charges?.count || 0));
