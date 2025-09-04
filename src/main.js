@@ -256,38 +256,41 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
   };
 
   // Try to clear common captcha prompts by clicking obvious buttons.
-  const ensureCaptchaCleared = async (maxWaitMs = 5000) => {
+  const ensureCaptchaCleared = async (maxWaitMs = 1000) => {
     const start = Date.now();
-    const tryClickTextMatch = (texts) => {
-      const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
-      for (const el of candidates) {
-        const txt = (el.textContent || el.value || '').toLowerCase();
-        if (!txt) continue;
-        if (texts.some(t => txt.includes(t))) {
-          try { el.click(); return true; } catch {}
+    const primarySelectors = [
+      '.btn.btn-primary.btn-lg.sm\\:btn-xl.relative.z-30', // same as paint button
+      '.btn.btn-primary.btn-lg.sm\\:btn-xl.relative'      // same as final button
+    ];
+    const keywords = ['human', 'verify', "i'm human", 'i am human', 'continue'];
+    const tryClickTextMatch = () => {
+      for (const sel of primarySelectors) {
+        const nodes = document.querySelectorAll(sel);
+        for (const el of nodes) {
+          const txt = (el.textContent || el.value || '').toLowerCase();
+          if (!txt) continue;
+          if (keywords.some(k => txt.includes(k))) {
+            try { el.click(); return true; } catch {}
+          }
         }
       }
       return false;
     };
 
     // Quick pass first
-    if (tryClickTextMatch(['human', 'verify', 'robot', 'continue'])) return true;
+  if (tryClickTextMatch()) return true;
 
     // Poll briefly for dynamic captchas/modals
-    while (Date.now() - start < maxWaitMs) {
+  while (Date.now() - start < maxWaitMs) {
       // Cloudflare/Turnstile wrappers
-      const cfWrap = document.querySelector('.cf-challenge, .cf-turnstile, #challenge-stage');
-      if (cfWrap) {
-        if (tryClickTextMatch(['verify', 'continue'])) return true;
-      }
+  const cfWrap = document.querySelector('.cf-challenge, .cf-turnstile, #challenge-stage');
+  if (cfWrap && tryClickTextMatch()) return true;
 
       // Generic modal dialogs
-      const modal = document.querySelector('[class*="modal" i], [role="dialog"]');
-      if (modal) {
-        if (tryClickTextMatch(['human', 'verify', 'continue'])) return true;
-      }
+  const modal = document.querySelector('[class*="modal" i], [role="dialog"]');
+  if (modal && tryClickTextMatch()) return true;
 
-      await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, 100));
     }
     return false;
   };
@@ -309,8 +312,8 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
     };
 
     const triggerAction = async () => {
-      // Clear captcha first, if any
-      try { await ensureCaptchaCleared(6000); } catch {}
+  // Clear captcha first, if any (short 1s attempt)
+  try { await ensureCaptchaCleared(1000); } catch {}
       // Open paint menu
       const paintBtn = await waitForElement('.btn.btn-primary.btn-lg.sm\\:btn-xl.relative.z-30', true, 20000);
       if (!paintBtn) throw new Error('Paint button not found');
@@ -328,8 +331,8 @@ consoleLog(`%c${name}%c (${version}) userscript has loaded!`, 'color: cornflower
         await new Promise(r => setTimeout(r, 50));
       }
 
-      // Clear captcha again if it appeared after opening paint
-      try { await ensureCaptchaCleared(6000); } catch {}
+  // Clear captcha again if it appeared after opening paint (short 1s attempt)
+  try { await ensureCaptchaCleared(1000); } catch {}
 
       // Click final confirm
       const finalBtn = await waitForElement('.btn.btn-primary.btn-lg.sm\\:btn-xl.relative', true, 20000);
